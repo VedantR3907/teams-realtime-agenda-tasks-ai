@@ -107,7 +107,3 @@ Note: this service is one part of a larger system. To run end-to-end it needs th
 ## My Role
 
 I designed and built this AI server end to end: the real-time audio pipeline, per-speaker speech-to-text streaming, the agenda-tracking and task-extraction prompts, the LLM coordinator, timers and alerts, analytics, minutes, and the Socket.IO integration with the platform.
-
-## Disclaimer
-
-This code runs in a real production system. Company names, endpoints, IDs and all meeting data have been removed or replaced for public release.

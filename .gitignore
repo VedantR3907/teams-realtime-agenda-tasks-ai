@@ -1,0 +1,28 @@
+# Secrets
+.env
+*.pem
+*.pfx
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+myenv/
+
+# Runtime output (may contain real meeting data, never commit)
+logs/
+analytics/
+transcript/
+transcripts/
+output/
+uploads/
+*.log
+llm_buffer.json
+transcript.txt
+
+# Editors / tools
+.idea/
+.vscode/
+.qodo/

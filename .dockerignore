@@ -1,0 +1,14 @@
+venv/
+.env
+myenv/
+env/
+__pycache__
+uploads/
+/test
+/app/test
+/.ideas
+/volumes
+/app.log
+/logs
+.idea
+.git

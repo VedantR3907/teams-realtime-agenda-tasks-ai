@@ -8,7 +8,7 @@ Runs in production for a meeting-productivity SaaS. Supports **English and Germa
 
 ## Key Features
 
-- **Live per-speaker transcription**: one Deepgram Nova-3 stream per participant, so speakers never get mixed up
+- **Live per-speaker transcription**: one streaming speech-to-text connection per participant, so speakers never get mixed up
 - **Real-time agenda tracking**: an LLM moves agenda items between *Not Started → In Progress → On Hold → Completed* as people talk
 - **Automatic task capture**: finds **Agreements** (tasks), **Decisions** and **Issues** with assignee and due date ("Sarah will send the budget by Friday")
 - **Name correction**: fixes names the speech-to-text got wrong and maps them to real participant IDs
@@ -21,40 +21,47 @@ Runs in production for a meeting-productivity SaaS. Supports **English and Germa
 ## High-Level Architecture
 
 ```
-┌──────────────────┐  per-speaker PCM audio  ┌─────────────────────────────┐   live transcripts   ┌─────────────┐
-│  Teams Media Bot │ ──────── WebSocket ────►│   Agenda & Tasks AI server  │ ◄──── WebSocket ────►│  Deepgram   │
-│  (C#, joins call)│                         │   (FastAPI, this repo)      │                      │  Nova-3 STT │
-└──────────────────┘                         └──────────────┬──────────────┘                      └─────────────┘
-                                                            │ every pause in speech (debounced)
-                                                            ▼
-                                     ┌──────────────────────────────────────────┐
-                                     │  Two LLM calls in parallel               │
-                                     │  1) Agenda tracker  → state changes      │
-                                     │  2) Task extractor  → task / decision /  │
-                                     │                       issue + owner/date │
-                                     └──────────────────────┬───────────────────┘
-                                                            │ results sent the moment each one is ready
-                                                            ▼
-                     ┌───────────────────────────┐    Socket.IO     ┌────────────────────────────┐
-                     │  Meeting platform backend │ ◄────────────────│  agenda / progress_item /  │
-                     │  + web UI (live updates)  │                  │  time_out_alert events     │
-                     └───────────────────────────┘                  └────────────────────────────┘
-                                                            │ meeting ends
-                                                            ▼
-                                  Meeting minutes  +  task cards to each assignee in Teams
+┌─────────────────────────┐
+│  Microsoft Teams call   │
+│  (bot joins the meeting)│
+└────────────┬────────────┘
+             │ each speaker's audio, live
+             ▼
+┌─────────────────────────┐   audio    ┌─────────────────────────┐
+│  Agenda & Tasks AI      │ ─────────► │  Speech-to-Text API     │
+│  server (this repo)     │ ◄───────── │  (streaming)            │
+└────────────┬────────────┘ live text  └─────────────────────────┘
+             │ new transcript after each pause
+             ▼
+┌─────────────────────────┐
+│  External LLM call      │
+│  • Agenda tracking      │
+│  • Task tracking        │
+│    per person           │
+└────────────┬────────────┘
+             │ live updates
+             ▼
+┌─────────────────────────┐
+│  Meeting dashboard      │
+│  agenda status, tasks,  │
+│  overtime alerts        │
+└────────────┬────────────┘
+             │ meeting ends
+             ▼
+  Meeting minutes + task cards in Teams
 ```
 
-**Flow:** Bot joins the call → streams each speaker's audio over WebSocket → server opens a Deepgram stream per speaker → when people pause, the new transcript is sent to two LLMs in parallel → agenda changes and new tasks are pushed live to the UI over Socket.IO → at the end, minutes are written and task cards go out in Teams.
+**Flow:** Bot joins the Teams call → streams each speaker's audio to the server → speech-to-text turns it into live text per speaker → after each pause, the new text goes to the LLM → agenda status and each person's tasks update live on the dashboard → when the meeting ends, minutes are written and task cards go out in Teams.
 
 ## Design Decisions & Trade-offs
 
-- **One STT stream per speaker, not one for the whole call.** The bot gets separate (unmixed) audio for each participant, so the transcript always knows who said what. This matters because task owners come from *who* spoke. Trade-off: more open connections to Deepgram per meeting.
+- **One STT stream per speaker, not one for the whole call.** The bot gets separate (unmixed) audio for each participant, so the transcript always knows who said what. This matters because task owners come from *who* spoke. Trade-off: more open speech-to-text connections per meeting.
 - **Debounced LLM calls (250 ms after speech stops).** Calling the LLM on every word is slow and expensive; waiting for a short pause batches the speech into one call. Stale scheduled calls are dropped, so only the latest one runs.
 - **Only new transcript goes to the LLM.** Each call gets the text since the last call plus the current agenda state, not the whole meeting. This keeps prompts small and fast even in long meetings.
 - **Agenda and tasks run as two separate LLM calls, in parallel.** Two focused prompts are more accurate than one big prompt doing both. Results are emitted as soon as *each* finishes, so the faster one doesn't wait for the slower one.
-- **Keep-alive and silence handling on STT streams.** Deepgram closes idle connections after about 10 seconds, so the server sends keep-alives and closes a speaker's stream after 45 seconds of silence to save cost.
+- **Keep-alive and silence handling on STT streams.** The speech-to-text provider closes idle connections after about 10 seconds, so the server sends keep-alives and closes a speaker's stream after 45 seconds of silence to save cost.
 - **Socket.IO with reconnect and exponential backoff.** If the bot is removed and re-added, or the network drops, the client reconnects and rejoins the meeting room without losing state.
-- **Model provider is swappable.** Gemini or OpenAI through one OpenAI-compatible client; a stronger model is used only for the final minutes.
+- **Model provider is swappable.** All LLM calls go through one OpenAI-compatible client, so the provider can be changed with a setting. A small, fast model handles the live calls; a stronger model is used only for the final minutes.
 - **Trade-off: in-memory meeting state.** Fast and simple for one meeting per process, but state is lost if the process crashes mid-meeting. Each meeting runs as its own process, so one crash doesn't affect others.
 
 ## Tech Stack
@@ -62,10 +69,9 @@ Runs in production for a meeting-productivity SaaS. Supports **English and Germa
 | Layer          | Technology                                                    |
 |----------------|---------------------------------------------------------------|
 | Runtime        | Python 3.12, FastAPI, asyncio, Uvicorn                        |
-| Speech-to-text | Deepgram Nova-3 (streaming, multilingual)                     |
-| LLMs           | Google Gemini 2.0 Flash / 2.5 Pro, OpenAI GPT-4.1 nano        |
+| AI             | Streaming speech-to-text API, LLM API (provider-swappable)    |
 | Real-time      | WebSockets (bot ↔ server), Socket.IO (server ↔ platform)      |
-| Microsoft      | Teams media bot (Graph Communications), Adaptive Cards, MSAL  |
+| Microsoft      | Microsoft Teams SDK (real-time media bot), Microsoft Graph API, Adaptive Cards, MSAL |
 | Cloud          | Docker, AWS CloudWatch logging                                |
 
 ## Project Structure
@@ -77,7 +83,7 @@ app/
 │   ├── websocket_handlers.py meeting_details / audio / meeting_ended events
 │   └── client_socketio/      Socket.IO client that pushes live updates to the platform
 ├── ProgressAnalyzer/
-│   ├── STT.py                Deepgram streaming per speaker
+│   ├── STT.py                streaming speech-to-text per speaker
 │   ├── processors/           agenda tracker, task extractor, name correction, minutes
 │   └── prompts/              LLM prompts (English + German)
 └── utils/meeting/
@@ -100,7 +106,7 @@ Note: this service is one part of a larger system. To run end-to-end it needs th
 
 ## My Role
 
-I designed and built this AI server end to end: the real-time audio pipeline, per-speaker Deepgram streaming, the agenda-tracking and task-extraction prompts, the LLM coordinator, timers and alerts, analytics, minutes, and the Socket.IO integration with the platform.
+I designed and built this AI server end to end: the real-time audio pipeline, per-speaker speech-to-text streaming, the agenda-tracking and task-extraction prompts, the LLM coordinator, timers and alerts, analytics, minutes, and the Socket.IO integration with the platform.
 
 ## Disclaimer
 
